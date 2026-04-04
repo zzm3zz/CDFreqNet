@@ -59,9 +59,9 @@ class DynamicTemporalConstraint(nn.Module):
 
         return 1.0 - ent_norm
 
-    def get_annealing_weight(self, feat_clean, feat_aug, pred_aug, current_epoch):
-        sim = self.compute_cosine_similarity(feat_clean, feat_aug)
-        conf = self.compute_confidence(pred_aug)
+    def get_annealing_weight(self, feat_facutal, feat_intervention, pred_intervention, current_epoch):
+        sim = self.compute_cosine_similarity(feat_facutal, feat_intervention)
+        conf = self.compute_confidence(pred_intervention)
         drift = 1.0 - sim
     
         progress = min(1.0, max(0.0, current_epoch / self.warmup_epochs))
@@ -75,8 +75,8 @@ class DynamicTemporalConstraint(nn.Module):
         return weight
 
     def forward(self, 
-                f_clean_src, f_aug_src, p_aug_src, mask_src,
-                f_clean_tgt, f_aug_tgt, p_aug_tgt, mask_tgt,
+                f_facutal_src, f_intervention_src, p_intervention_src, mask_src,
+                f_facutal_tgt, f_intervention_tgt, p_intervention_tgt, mask_tgt,
                 current_epoch=0):
         
         if mask_src.dim() == 5:
@@ -92,17 +92,17 @@ class DynamicTemporalConstraint(nn.Module):
         target_shape_src = mask_src_idx.shape[-3:]
         target_shape_tgt = mask_tgt_idx.shape[-3:]
 
-        if f_clean_src.shape[2:] != target_shape_src:
-             f_clean_src = F.interpolate(f_clean_src, size=target_shape_src, mode='trilinear', align_corners=False)
-             f_aug_src = F.interpolate(f_aug_src, size=target_shape_src, mode='trilinear', align_corners=False)
+        if f_facutal_src.shape[2:] != target_shape_src:
+             f_facutal_src = F.interpolate(f_facutal_src, size=target_shape_src, mode='trilinear', align_corners=False)
+             f_intervention_src = F.interpolate(f_intervention_src, size=target_shape_src, mode='trilinear', align_corners=False)
              
-        if f_clean_tgt.shape[2:] != target_shape_tgt:
-             f_clean_tgt = F.interpolate(f_clean_tgt, size=target_shape_tgt, mode='trilinear', align_corners=False)
-             f_aug_tgt = F.interpolate(f_aug_tgt, size=target_shape_tgt, mode='trilinear', align_corners=False)
+        if f_facutal_tgt.shape[2:] != target_shape_tgt:
+             f_facutal_tgt = F.interpolate(f_facutal_tgt, size=target_shape_tgt, mode='trilinear', align_corners=False)
+             f_intervention_tgt = F.interpolate(f_intervention_tgt, size=target_shape_tgt, mode='trilinear', align_corners=False)
 
-        w_src = self.get_annealing_weight(f_clean_src, f_aug_src, p_aug_src, current_epoch)
-        w_tgt = self.get_annealing_weight(f_clean_tgt, f_aug_tgt, p_aug_tgt, current_epoch)
+        w_src = self.get_annealing_weight(f_facutal_src, f_intervention_src, p_intervention_src, current_epoch)
+        w_tgt = self.get_annealing_weight(f_facutal_tgt, f_intervention_tgt, p_intervention_tgt, current_epoch)
 
-        loss_align = torch.tensor(0.0, device=f_clean_src.device)
+        loss_align = torch.tensor(0.0, device=f_facutal_src.device)
             
         return w_src, w_tgt, loss_align
