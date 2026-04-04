@@ -25,9 +25,9 @@ class LargeConv(nn.Module):
     def forward(self, x): return self.conv(x)
 
 class SimpleEncoder(nn.Module):
-    def __init__(self, in_channels, chs, is_structure=True):
+    def __init__(self, in_channels, chs, is_high=True):
         super().__init__()
-        self.level0 = GradConv(in_channels, chs[0]) if is_structure else LargeConv(in_channels, chs[0])
+        self.level0 = GradConv(in_channels, chs[0]) if is_high else LargeConv(in_channels, chs[0])
         self.down1 = Down(chs[0], chs[1]); self.down2 = Down(chs[1], chs[2]); self.down3 = Down(chs[2], chs[3]); self.down4 = Down(chs[3], chs[4])
     def forward(self, x):
         x0 = self.level0(x); x1 = self.down1(x0); x2 = self.down2(x1); x3 = self.down3(x2); x4 = self.down4(x3)
@@ -38,8 +38,8 @@ class CDFreqNet(nn.Module):
         super(CDFreqNet, self).__init__()
         self.chs = (16, 32, 64, 128, 256)
         
-        self.struct_encoder = SimpleEncoder(1, self.chs, True)
-        self.style_encoder = SimpleEncoder(1, self.chs, False)
+        self.high_encoder = SimpleEncoder(1, self.chs, True)
+        self.low_encoder = SimpleEncoder(1, self.chs, False)
         
         bot_ch = self.chs[-1] 
         
@@ -65,25 +65,25 @@ class CDFreqNet(nn.Module):
             elif isinstance(m, nn.InstanceNorm3d):
                 if m.weight is not None: m.weight.data.fill_(1); m.bias.data.zero_()
 
-    def forward(self, x_struct, x_style, label=None, return_proto=False, mod='A', rmmax=40, epoch=1):
+    def forward(self, x_high, x_low, label=None, return_proto=False, mod='A', rmmax=40, epoch=1):
 
-        struct_feats = self.struct_encoder(x_struct)
-        style_feats = self.style_encoder(x_style)
+        high_feats = self.high_encoder(x_high)
+        low_feats = self.low_encoder(x_low)
             
-        if return_proto: return struct_feats[-1]
+        if return_proto: return high_feats[-1]
 
-        bottle = self.afr_bottle(struct_feats[-1], style_feats[-1])
+        bottle = self.afr_bottle(high_feats[-1], low_feats[-1])
 
-        skip3 = self.afr_skip3(struct_feats[-2], style_feats[-2])
+        skip3 = self.afr_skip3(high_feats[-2], low_feats[-2])
         x = self.up1(bottle, skip3) # 256 + 128 -> 128
 
-        skip2 = self.afr_skip2(struct_feats[-3], style_feats[-3])
+        skip2 = self.afr_skip2(high_feats[-3], low_feats[-3])
         x = self.up2(x, skip2)
 
-        skip1 = torch.cat([style_feats[-4], struct_feats[-4]], dim=1)
+        skip1 = torch.cat([low_feats[-4], high_feats[-4]], dim=1)
         x = self.up3(x, skip1)
 
-        skip0 = torch.cat([style_feats[0], struct_feats[0]], dim=1)
+        skip0 = torch.cat([low_feats[0], high_feats[0]], dim=1)
         x_final = self.up4(x, skip0)
         
         return self.act(self.out_conv(x_final)), x_final
