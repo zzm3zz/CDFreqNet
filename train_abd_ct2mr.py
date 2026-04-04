@@ -6,7 +6,7 @@ from models.network import CDFreqNet
 from utils.STN import SpatialTransformer
 from utils.Transform_self import SpatialTransform
 from utils.dataloader import Dataset3D_DFI as TrainDataset
-from utils.dataloader import Dataset3D  # Import for validation dataset
+from utils.dataloader import Dataset3D  
 from torch.utils.data import DataLoader
 from utils.losses import dice_loss, prob_entropyloss
 from utils.utils import AverageMeter, LogWriter, dice
@@ -22,8 +22,6 @@ class Trainer(object):
     def __init__(self, args=None):
         super(Trainer, self).__init__()
 
-        self.fold_num = args.fold_num
-        self.fold = args.fold
         self.start_epoch = args.start_epoch
         self.epoches = args.num_epoch
         self.iters = args.num_iters
@@ -63,8 +61,7 @@ class Trainer(object):
 
         self.checkpoint_dir = os.path.join(args.checkpoint_root, self.model_name + '_' + timestamp + '_' + str(self.direction) + '_' + str(self.part))
         crt_file(self.checkpoint_dir)
-        self.checkpoint_ = self.checkpoint_dir + "/fold_" + str(args.fold)
-        crt_file(self.checkpoint_)
+        crt_file(self.checkpoint_dir)
 
         # Data augmentation (Source & Target Spatial Augmentation)
         self.spatial_aug = SpatialTransform(do_rotation=True,
@@ -146,52 +143,52 @@ class Trainer(object):
         categorical = np.reshape(categorical, output_shape)
         return categorical
 
-    def train_iterator(self, srs_struct, srs_style, srs_struct_r, srs_style_r, srs_label, 
-                       tar_struct, tar_style, tar_struct_r, tar_style_r, epoch, iters):
+    def train_iterator(self, srs_high, srs_low, srs_high_r, srs_low_r, srs_label, 
+                       tar_high, tar_low, tar_high_r, tar_low_r, epoch, iters):
 
         self.optimizer.zero_grad()
 
         # ============================================================
         # Part 1: Source Domain Training (Supervised + Consistency)
         # ============================================================
-        pred_src_clean, feat_src_clean = self.model(x_struct=srs_struct, x_style=srs_style, 
+        pred_src_factual, feat_src_factual = self.model(x_high=srs_high, x_low=srs_low, 
                                     rmmax=self.srs_rmmax)
-        pred_src_style, feat_src_style = self.model(x_struct=srs_struct_r, x_style=srs_style_r, 
+        pred_src_intervention, feat_src_intervention = self.model(x_high=srs_high_r, x_low=srs_low_r, 
                                     rmmax=self.srs_rmmax)
 
-        pred_tar_clean, feat_tar_clean = self.model(x_struct=tar_struct, x_style=tar_style, 
+        pred_tar_factual, feat_tar_factual = self.model(x_high=tar_high, x_low=tar_low, 
                                     rmmax=self.tar_rmmax)
-        pred_tar_style, feat_tar_aug = self.model(x_struct=tar_struct_r, x_style=tar_style_r, 
+        pred_tar_intervention, feat_tar_intervention = self.model(x_high=tar_high_r, x_low=tar_low_r, 
                                     rmmax=self.tar_rmmax)
         
         w_src, w_tgt, loss_align = self.dtc(
-            f_clean_src=feat_src_clean, 
-            f_aug_src=feat_src_style, 
-            p_aug_src=pred_src_style,    
+            f_factual_src=feat_src_factual, 
+            f_intervention_src=feat_src_intervention, 
+            p_intervention_src=pred_src_intervention,    
             mask_src=srs_label,
-            f_clean_tgt=feat_tar_clean, 
-            f_aug_tgt=feat_tar_aug, 
-            p_aug_tgt=pred_tar_style, 
-            mask_tgt=pred_tar_clean.detach(),
+            f_factual_tgt=feat_tar_factual, 
+            f_intervention_tgt=feat_tar_intervention, 
+            p_intervention_tgt=pred_tar_intervention, 
+            mask_tgt=pred_tar_factual.detach(),
             current_epoch=epoch
         )
        
-        loss_seg_src_clean = self.criterion_seg(pred_src_clean, srs_label, weight_map=None)
+        loss_seg_src_factual = self.criterion_seg(pred_src_factual, srs_label, weight_map=None)
                            
-        loss_seg_src = self.criterion_seg(pred_src_style, srs_label, weight_map=w_src)
+        loss_seg_src = self.criterion_seg(pred_src_intervention, srs_label, weight_map=w_src)
                            
-        loss_cons_tar = self.criterion_seg(pred_tar_clean, pred_tar_style, weight_map=w_tgt) * 0.5
+        loss_cons_tar = self.criterion_seg(pred_tar_factual, pred_tar_intervention, weight_map=w_tgt) * 0.5
 
         w_src_seg = 1.0
         w_cons = 1.0
 
-        loss_total = w_src_seg * (loss_seg_src + loss_seg_src_clean) + \
+        loss_total = w_src_seg * (loss_seg_src + loss_seg_src_factual) + \
                      w_cons * (loss_cons_tar)
         loss_total.backward()
         self.optimizer.step()
 
-        self.L_seg_log.update(loss_seg_src.item(), srs_struct.size(0))
-        self.L_consist_log.update(loss_cons_tar.item() if torch.is_tensor(loss_cons_tar) else loss_cons_tar, srs_struct.size(0))
+        self.L_seg_log.update(loss_seg_src.item(), srs_high.size(0))
+        self.L_consist_log.update(loss_cons_tar.item() if torch.is_tensor(loss_cons_tar) else loss_cons_tar, srs_high.size(0))
 
     def train_epoch(self, epoch):
         self.model.train()
@@ -201,49 +198,49 @@ class Trainer(object):
 
         for i in range(self.iters):
             try:
-                srs_struct, srs_style, srs_struct_r, srs_style_r, srslabel = next(loader_src)
+                srs_high, srs_low, srs_high_r, srs_low_r, srslabel = next(loader_src)
             except StopIteration:
                 loader_src = iter(self.dataloader_srstrain)
-                srs_struct, srs_style, srs_struct_r, srs_style_r, srslabel = next(loader_src)
+                srs_high, srs_low, srs_high_r, srs_low_r, srslabel = next(loader_src)
             try:
-                tar_struct, tar_style, tar_struct_r, tar_style_r, _ = next(loader_tar)
+                tar_high, tar_low, tar_high_r, tar_low_r, _ = next(loader_tar)
             except StopIteration:
                 loader_tar = iter(self.dataloader_tartrain)
-                tar_struct, tar_style, tar_struct_r, tar_style_r, _ = next(loader_tar)
+                tar_high, tar_low, tar_high_r, tar_low_r, _ = next(loader_tar)
 
             if torch.cuda.is_available():
-                srs_struct = srs_struct.cuda()
-                srs_style = srs_style.cuda()
-                srs_struct_r = srs_struct_r.cuda()
-                srs_style_r = srs_style_r.cuda()
+                srs_high = srs_high.cuda()
+                srs_low = srs_low.cuda()
+                srs_high_r = srs_high_r.cuda()
+                srs_low_r = srs_low_r.cuda()
                 srslabel = srslabel.cuda()
                 
-                tar_struct = tar_struct.cuda()
-                tar_style = tar_style.cuda()
-                tar_struct_r = tar_struct_r.cuda()
-                tar_style_r = tar_style_r.cuda()
+                tar_high = tar_high.cuda()
+                tar_low = tar_low.cuda()
+                tar_high_r = tar_high_r.cuda()
+                tar_low_r = tar_low_r.cuda()
                 
-            mat, code_spa = self.spatial_aug.rand_coords(srs_struct.shape[2:])
+            mat, code_spa = self.spatial_aug.rand_coords(srs_high.shape[2:])
             
-            srs_struct = self.spatial_aug.augment_spatial(srs_struct, mat, code_spa)
-            srs_style = self.spatial_aug.augment_spatial(srs_style, mat, code_spa)
-            srs_struct_r = self.spatial_aug.augment_spatial(srs_struct_r, mat, code_spa)
-            srs_style_r = self.spatial_aug.augment_spatial(srs_style_r, mat, code_spa)
+            srs_high = self.spatial_aug.augment_spatial(srs_high, mat, code_spa)
+            srs_low = self.spatial_aug.augment_spatial(srs_low, mat, code_spa)
+            srs_high_r = self.spatial_aug.augment_spatial(srs_high_r, mat, code_spa)
+            srs_low_r = self.spatial_aug.augment_spatial(srs_low_r, mat, code_spa)
             
             srslabel = self.spatial_aug.augment_spatial(srslabel, mat, code_spa, mode="nearest").int()
             
             srslabel_np = srslabel.cpu().numpy()[0][0]
             srslabel = torch.from_numpy(self.to_categorical(srslabel_np, num_classes=self.n_classes)[np.newaxis, :, :, :, :]).cuda()
 
-            mat_t, code_spa_t = self.spatial_aug.rand_coords(tar_struct.shape[2:])
+            mat_t, code_spa_t = self.spatial_aug.rand_coords(tar_high.shape[2:])
             
-            tar_struct = self.spatial_aug.augment_spatial(tar_struct, mat_t, code_spa_t)
-            tar_style = self.spatial_aug.augment_spatial(tar_style, mat_t, code_spa_t)
-            tar_struct_r = self.spatial_aug.augment_spatial(tar_struct_r, mat_t, code_spa_t)
-            tar_style_r = self.spatial_aug.augment_spatial(tar_style_r, mat_t, code_spa_t)
+            tar_high = self.spatial_aug.augment_spatial(tar_high, mat_t, code_spa_t)
+            tar_low = self.spatial_aug.augment_spatial(tar_low, mat_t, code_spa_t)
+            tar_high_r = self.spatial_aug.augment_spatial(tar_high_r, mat_t, code_spa_t)
+            tar_low_r = self.spatial_aug.augment_spatial(tar_low_r, mat_t, code_spa_t)
 
-            self.train_iterator(srs_struct, srs_style, srs_struct_r, srs_style_r, srslabel, 
-                                tar_struct, tar_style, tar_struct_r, tar_style_r, epoch, i)
+            self.train_iterator(srs_high, srs_low, srs_high_r, srs_low_r, srslabel, 
+                                tar_high, tar_low, tar_high_r, tar_low_r, epoch, i)
 
             res = '\t'.join(['Epoch: [%d/%d]' % (epoch + 1, self.epoches),
                              'Iter: [%d/%d]' % (i + 1, self.iters),
@@ -297,8 +294,6 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='UDA seg Training Function')
 
-    parser.add_argument('--fold_num', type=int, default=5)
-    parser.add_argument('--fold', type=int, default=0)
     parser.add_argument('--direction', default="A2B")
     parser.add_argument('--part', default="40_20")
     parser.add_argument('--srs_rmmax', type=int, default=40)
