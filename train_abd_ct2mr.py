@@ -310,7 +310,7 @@ if __name__ == '__main__':
     parser.add_argument('--A_root', default="./data/private/datasets/CT/abd/dataTr/")
     parser.add_argument('--B_root', default="./data/private/datasets/MR/abd/dataTr/")
 
-    parser.add_argument('--checkpoint_root', default="/public/home/zhangzengmin/CDFreqNet/checks/checks_abd_ct2mr") 
+    parser.add_argument('--checkpoint_root', default="./checks/checks_abd_ct2mr") 
     
     args = parser.parse_args()
 
