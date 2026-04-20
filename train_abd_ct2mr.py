@@ -13,7 +13,7 @@ from utils.utils import AverageMeter, LogWriter, dice
 import numpy as np
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
-from utils.DynamicTemporalConstraint import DynamicTemporalConstraint, SpatialWeighted_DiceLoss
+from utils.DynamicLossConstraint import DynamicLossConstraint, SpatialWeighted_DiceLoss
 
 def crt_file(path):
     os.makedirs(path, exist_ok=True)
@@ -107,7 +107,7 @@ class Trainer(object):
         self.L_seg = dice_loss
         self.L_mse = nn.MSELoss() 
         
-        self.dtc = DynamicTemporalConstraint(num_classes=self.n_classes, 
+        self.dtc = DynamicLossConstraint(num_classes=self.n_classes, 
                                       tau=0.5, feat_channels=64).cuda()
 
         self.criterion_seg = SpatialWeighted_DiceLoss(num_classes=self.n_classes).cuda()
