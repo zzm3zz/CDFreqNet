@@ -64,7 +64,7 @@ def calculate_metrics(pred, gt, num_classes):
 def test():
     weight_path = ""
 
-    test_dir = "./data/MR/CHAOS/dataTr/"
+    test_dir = "./data/MR/CHAOS/dataTs/"
     
     save_dir = os.path.join(os.path.dirname(weight_path), "test_predictions")
     os.makedirs(save_dir, exist_ok=True)
