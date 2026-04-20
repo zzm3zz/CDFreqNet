@@ -32,7 +32,7 @@ class SpatialWeighted_DiceLoss(nn.Module):
         return 1.0 - torch.mean(dice)
 
 
-class DynamicTemporalConstraint(nn.Module):
+class DynamicLossConstraint(nn.Module):
     def __init__(self, num_classes, alpha=1.0, beta=2.0, feat_channels=64, tau=None, warmup_epochs=200):
         super().__init__()
         self.num_classes = num_classes
