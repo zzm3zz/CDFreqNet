@@ -1,4 +1,5 @@
 import os
+import random
 from datetime import datetime
 import torch
 from torch import nn
@@ -6,26 +7,58 @@ from models.network import CDFreqNet
 from utils.STN import SpatialTransformer
 from utils.Transform_self import SpatialTransform
 from utils.dataloader import Dataset3D_DFI as TrainDataset
-from utils.dataloader import Dataset3D  
+from utils.dataloader import Dataset3D
 from torch.utils.data import DataLoader
 from utils.losses import dice_loss, prob_entropyloss
 from utils.utils import AverageMeter, LogWriter, dice
 import numpy as np
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
-from utils.DynamicLossConstraint import DynamicLossConstraint, SpatialWeighted_DiceLoss
+from utils.DynamicTemporalConstraint import DynamicTemporalConstraint, SpatialWeighted_DiceLoss
+
+
+def seed_everything(seed):
+    """Seed Python, NumPy, PyTorch, CUDA, and cuDNN before training starts."""
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+
+
+def seed_worker(worker_id):
+    """Seed Python and NumPy inside each DataLoader worker."""
+    del worker_id
+    worker_seed = torch.initial_seed() % (2 ** 32)
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
+def make_generator(seed):
+    """Create an independent deterministic generator for one DataLoader."""
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    return generator
+
 
 def crt_file(path):
     os.makedirs(path, exist_ok=True)
+
 
 class Trainer(object):
     def __init__(self, args=None):
         super(Trainer, self).__init__()
 
+        self.fold_num = args.fold_num
+        self.fold = args.fold
         self.start_epoch = args.start_epoch
         self.epoches = args.num_epoch
         self.iters = args.num_iters
-        self.save_epoch = args.save_epoch
 
         self.model_name = args.model_name
         self.direction = args.direction
@@ -41,29 +74,31 @@ class Trainer(object):
         B_root = args.B_root
         Val_root = args.Val_root
 
-        data_listA = [os.path.join(A_root, k) for k in os.listdir(A_root) if not k.startswith('.')]
-        data_listB = [os.path.join(B_root, k) for k in os.listdir(B_root) if not k.startswith('.')]
-        
-        # Validation path logic
-        val_path = Val_root
-        if os.path.exists(val_path):
-            data_list_val = [os.path.join(val_path, k) for k in os.listdir(val_path) if not k.startswith('.')]
-        else:
-            print(f"Warning: Validation path {val_path} not found. Using training B data for validation.")
-            data_list_val = data_listB
+        data_listA = [os.path.join(A_root, k) for k in sorted(os.listdir(A_root)) if not k.startswith('.')]
+        data_listB = [os.path.join(B_root, k) for k in sorted(os.listdir(B_root)) if not k.startswith('.')]
+        data_list_val = [os.path.join(Val_root, k) for k in sorted(os.listdir(Val_root)) if not k.startswith('.')]
 
-        train_srs = data_listA # Source Labeled
-        train_tar = data_listB # Target Unlabeled
-        val_data = data_list_val
+        train_srs = data_listA          # Source training set with labels
+        train_tar = data_listB          # Target training set without labels
+        val_data = data_list_val        # Source validation set with labels
 
         now = datetime.now()
-        timestamp = now.strftime("%Y%m%d_%H%M%S")  
+        timestamp = now.strftime("%Y%m%d_%H%M%S")
 
-        self.checkpoint_dir = os.path.join(args.checkpoint_root, self.model_name + '_' + timestamp + '_' + str(self.direction) + '_' + str(self.part))
-        crt_file(self.checkpoint_dir)
+        self.checkpoint_dir = os.path.join(
+            args.checkpoint_root,
+            self.model_name + '_' + timestamp + '_' + str(self.direction) + '_' + str(self.part)
+        )
         crt_file(self.checkpoint_dir)
 
-        # Data augmentation (Source & Target Spatial Augmentation)
+        self.checkpoint_ = self.checkpoint_dir + "/fold_" + str(args.fold)
+        crt_file(self.checkpoint_)
+
+        # Only source-domain validation Dice is used for model selection
+        self.best_val_dice = -1.0
+        self.best_epoch = 0
+
+        # Data augmentation
         self.spatial_aug = SpatialTransform(do_rotation=True,
                                             angle_x=(-np.pi / 9, np.pi / 9),
                                             angle_y=(-np.pi / 9, np.pi / 9),
@@ -87,38 +122,70 @@ class Trainer(object):
                                             alpha=(0., 512.),
                                             sigma=(10., 13.))
 
-        # initialize model
+        # Initialize model
         self.model = CDFreqNet(input_channels=1, num_classes=self.n_classes).cuda()
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr_seg, weight_decay=1e-4)
         self.stn = SpatialTransformer()
 
-        trainsrs_dataset = TrainDataset(train_srs, rmmax=self.srs_rmmax)
-        traintar_dataset = TrainDataset(train_tar, rmmax=self.tar_rmmax)
-     
-        self.dataloader_srstrain = DataLoader(trainsrs_dataset, batch_size=self.bs, shuffle=True, drop_last=True, num_workers=1, pin_memory=True)
-        self.dataloader_tartrain = DataLoader(traintar_dataset, batch_size=self.bs, shuffle=True, drop_last=True, num_workers=1, pin_memory=True)
-        
-        # Validation dataloader
-        val_dataset = Dataset3D(val_data)
-   
-        self.dataloader_val = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=2, pin_memory=True)
+        # Training datasets
+        trainsrs_dataset = TrainDataset(train_srs, rmmax=self.srs_rmmax, max_move=0.3)
+        traintar_dataset = TrainDataset(train_tar, rmmax=self.tar_rmmax, max_move=0.3)
 
-        # define loss
+        source_generator = make_generator(args.seed)
+        target_generator = make_generator(args.seed + 1)
+        validation_generator = make_generator(args.seed + 2)
+
+        self.dataloader_srstrain = DataLoader(
+            trainsrs_dataset,
+            batch_size=self.bs,
+            shuffle=True,
+            drop_last=True,
+            num_workers=1,
+            pin_memory=True,
+            worker_init_fn=seed_worker,
+            generator=source_generator
+        )
+
+        self.dataloader_tartrain = DataLoader(
+            traintar_dataset,
+            batch_size=self.bs,
+            shuffle=True,
+            drop_last=True,
+            num_workers=1,
+            pin_memory=True,
+            worker_init_fn=seed_worker,
+            generator=target_generator
+        )
+
+        # Source validation dataset
+        val_dataset = Dataset3D(val_data)
+        self.dataloader_val = DataLoader(
+            val_dataset,
+            batch_size=1,
+            shuffle=False,
+            num_workers=2,
+            pin_memory=True,
+            worker_init_fn=seed_worker,
+            generator=validation_generator
+        )
+
+        # Define loss
         self.L_seg = dice_loss
-        self.L_mse = nn.MSELoss() 
-        
-        self.dtc = DynamicLossConstraint(num_classes=self.n_classes, 
-                                      tau=0.5, feat_channels=64).cuda()
+        self.L_mse = nn.MSELoss()
+
+        self.dtc = DynamicTemporalConstraint(num_classes=self.n_classes,
+                                             tau=0.5,
+                                             feat_channels=64).cuda()
 
         self.criterion_seg = SpatialWeighted_DiceLoss(num_classes=self.n_classes).cuda()
         self.criterion_cons = SpatialWeighted_DiceLoss(num_classes=self.n_classes).cuda()
-        
-        # define loss log
+
+        # Define training logs
         self.L_seg_log = AverageMeter(name='L_Seg')
         self.L_consist_log = AverageMeter(name='L_consist')
-        self.L_ent_log = AverageMeter(name='L_ent') 
-        
-        # Define validation logs
+        self.L_ent_log = AverageMeter(name='L_ent')
+
+        # Define source validation logs
         self.L_val_dice_log = AverageMeter(name='Val_Dice')
         self.L_val_loss_log = AverageMeter(name='Val_Loss')
 
@@ -143,176 +210,462 @@ class Trainer(object):
         categorical = np.reshape(categorical, output_shape)
         return categorical
 
-    def train_iterator(self, srs_high, srs_low, srs_high_r, srs_low_r, srs_label, 
-                       tar_high, tar_low, tar_high_r, tar_low_r, epoch, iters):
+    def train_iterator(self,
+                       srs_struct,
+                       srs_style,
+                       srs_struct_r,
+                       srs_style_r,
+                       srs_label,
+                       tar_struct,
+                       tar_style,
+                       tar_struct_r,
+                       tar_style_r,
+                       epoch,
+                       iters):
 
         self.optimizer.zero_grad()
 
         # ============================================================
-        # Part 1: Source Domain Training (Supervised + Consistency)
+        # Part 1: Source Domain Training
         # ============================================================
-        pred_src_factual, feat_src_factual = self.model(x_high=srs_high, x_low=srs_low, 
-                                    rmmax=self.srs_rmmax)
-        pred_src_intervention, feat_src_intervention = self.model(x_high=srs_high_r, x_low=srs_low_r, 
-                                    rmmax=self.srs_rmmax)
+        pred_src_clean, feat_src_clean = self.model(
+            x_struct=srs_struct,
+            x_style=srs_style,
+            mod='A',
+            rmmax=self.srs_rmmax
+        )
 
-        pred_tar_factual, feat_tar_factual = self.model(x_high=tar_high, x_low=tar_low, 
-                                    rmmax=self.tar_rmmax)
-        pred_tar_intervention, feat_tar_intervention = self.model(x_high=tar_high_r, x_low=tar_low_r, 
-                                    rmmax=self.tar_rmmax)
-        
+        pred_src_style, feat_src_style = self.model(
+            x_struct=srs_struct_r,
+            x_style=srs_style_r,
+            mod='A',
+            rmmax=self.srs_rmmax
+        )
+
+        # ============================================================
+        # Part 2: Target Domain Unlabeled Training
+        # ============================================================
+        pred_tar_clean, feat_tar_clean = self.model(
+            x_struct=tar_struct,
+            x_style=tar_style,
+            mod='B',
+            rmmax=self.tar_rmmax
+        )
+
+        pred_tar_style, feat_tar_aug = self.model(
+            x_struct=tar_struct_r,
+            x_style=tar_style_r,
+            mod='B',
+            rmmax=self.tar_rmmax
+        )
+
         w_src, w_tgt, loss_align = self.dtc(
-            f_factual_src=feat_src_factual, 
-            f_intervention_src=feat_src_intervention, 
-            p_intervention_src=pred_src_intervention,    
+            f_clean_src=feat_src_clean,
+            f_aug_src=feat_src_style,
+            p_aug_src=pred_src_style,
             mask_src=srs_label,
-            f_factual_tgt=feat_tar_factual, 
-            f_intervention_tgt=feat_tar_intervention, 
-            p_intervention_tgt=pred_tar_intervention, 
-            mask_tgt=pred_tar_factual.detach(),
+            f_clean_tgt=feat_tar_clean,
+            f_aug_tgt=feat_tar_aug,
+            p_aug_tgt=pred_tar_style,
+            mask_tgt=pred_tar_clean.detach(),
             current_epoch=epoch
         )
-       
-        loss_seg_src_factual = self.criterion_seg(pred_src_factual, srs_label, weight_map=None)
-                           
-        loss_seg_src = self.criterion_seg(pred_src_intervention, srs_label, weight_map=w_src)
-                           
-        loss_cons_tar = self.criterion_seg(pred_tar_factual, pred_tar_intervention, weight_map=w_tgt) * 0.5
 
-        w_src_seg = 1.0
-        w_cons = 1.0
+        # Source supervised losses
+        loss_seg_src_clean = self.criterion_seg(
+            pred_src_clean,
+            srs_label,
+            weight_map=None
+        )
 
-        loss_total = w_src_seg * (loss_seg_src + loss_seg_src_factual) + \
-                     w_cons * (loss_cons_tar)
+        loss_seg_src = self.criterion_seg(
+            pred_src_style,
+            srs_label,
+            weight_map=w_src
+        )
+
+        # Target consistency loss
+        loss_cons_tar = self.criterion_seg(
+            pred_tar_clean,
+            pred_tar_style,
+            weight_map=w_tgt
+        ) * 0.5
+
+        # Total loss
+        loss_total = loss_seg_src + loss_seg_src_clean + loss_cons_tar
         loss_total.backward()
         self.optimizer.step()
 
-        self.L_seg_log.update(loss_seg_src.item(), srs_high.size(0))
-        self.L_consist_log.update(loss_cons_tar.item() if torch.is_tensor(loss_cons_tar) else loss_cons_tar, srs_high.size(0))
+        # Logs
+        self.L_seg_log.update(loss_seg_src.item(), srs_struct.size(0))
+        self.L_consist_log.update(
+            loss_cons_tar.item() if torch.is_tensor(loss_cons_tar) else loss_cons_tar,
+            srs_struct.size(0)
+        )
 
-    def train_epoch(self, epoch):
+    def train_epoch(self, epoch, epoch_number):
         self.model.train()
 
         loader_src = iter(self.dataloader_srstrain)
         loader_tar = iter(self.dataloader_tartrain)
 
         for i in range(self.iters):
+
+            # Source training data
             try:
-                srs_high, srs_low, srs_high_r, srs_low_r, srslabel = next(loader_src)
+                srs_struct, srs_style, srs_struct_r, srs_style_r, srslabel = next(loader_src)
             except StopIteration:
                 loader_src = iter(self.dataloader_srstrain)
-                srs_high, srs_low, srs_high_r, srs_low_r, srslabel = next(loader_src)
+                srs_struct, srs_style, srs_struct_r, srs_style_r, srslabel = next(loader_src)
+
+            # Target unlabeled training data
             try:
-                tar_high, tar_low, tar_high_r, tar_low_r, _ = next(loader_tar)
+                tar_struct, tar_style, tar_struct_r, tar_style_r, _ = next(loader_tar)
             except StopIteration:
                 loader_tar = iter(self.dataloader_tartrain)
-                tar_high, tar_low, tar_high_r, tar_low_r, _ = next(loader_tar)
+                tar_struct, tar_style, tar_struct_r, tar_style_r, _ = next(loader_tar)
 
+            # Move to GPU
             if torch.cuda.is_available():
-                srs_high = srs_high.cuda()
-                srs_low = srs_low.cuda()
-                srs_high_r = srs_high_r.cuda()
-                srs_low_r = srs_low_r.cuda()
+                srs_struct = srs_struct.cuda()
+                srs_style = srs_style.cuda()
+                srs_struct_r = srs_struct_r.cuda()
+                srs_style_r = srs_style_r.cuda()
                 srslabel = srslabel.cuda()
-                
-                tar_high = tar_high.cuda()
-                tar_low = tar_low.cuda()
-                tar_high_r = tar_high_r.cuda()
-                tar_low_r = tar_low_r.cuda()
-                
-            mat, code_spa = self.spatial_aug.rand_coords(srs_high.shape[2:])
-            
-            srs_high = self.spatial_aug.augment_spatial(srs_high, mat, code_spa)
-            srs_low = self.spatial_aug.augment_spatial(srs_low, mat, code_spa)
-            srs_high_r = self.spatial_aug.augment_spatial(srs_high_r, mat, code_spa)
-            srs_low_r = self.spatial_aug.augment_spatial(srs_low_r, mat, code_spa)
-            
-            srslabel = self.spatial_aug.augment_spatial(srslabel, mat, code_spa, mode="nearest").int()
-            
+
+                tar_struct = tar_struct.cuda()
+                tar_style = tar_style.cuda()
+                tar_struct_r = tar_struct_r.cuda()
+                tar_style_r = tar_style_r.cuda()
+
+            # Source augmentation
+            mat, code_spa = self.spatial_aug.rand_coords(srs_struct.shape[2:])
+
+            srs_struct = self.spatial_aug.augment_spatial(srs_struct, mat, code_spa)
+            srs_style = self.spatial_aug.augment_spatial(srs_style, mat, code_spa)
+            srs_struct_r = self.spatial_aug.augment_spatial(srs_struct_r, mat, code_spa)
+            srs_style_r = self.spatial_aug.augment_spatial(srs_style_r, mat, code_spa)
+
+            srslabel = self.spatial_aug.augment_spatial(
+                srslabel,
+                mat,
+                code_spa,
+                mode="nearest"
+            ).int()
+
+            # Label processing
             srslabel_np = srslabel.cpu().numpy()[0][0]
-            srslabel = torch.from_numpy(self.to_categorical(srslabel_np, num_classes=self.n_classes)[np.newaxis, :, :, :, :]).cuda()
+            srslabel = torch.from_numpy(
+                self.to_categorical(
+                    srslabel_np,
+                    num_classes=self.n_classes
+                )[np.newaxis, :, :, :, :]
+            ).cuda()
 
-            mat_t, code_spa_t = self.spatial_aug.rand_coords(tar_high.shape[2:])
-            
-            tar_high = self.spatial_aug.augment_spatial(tar_high, mat_t, code_spa_t)
-            tar_low = self.spatial_aug.augment_spatial(tar_low, mat_t, code_spa_t)
-            tar_high_r = self.spatial_aug.augment_spatial(tar_high_r, mat_t, code_spa_t)
-            tar_low_r = self.spatial_aug.augment_spatial(tar_low_r, mat_t, code_spa_t)
+            # Target augmentation
+            mat_t, code_spa_t = self.spatial_aug.rand_coords(tar_struct.shape[2:])
 
-            self.train_iterator(srs_high, srs_low, srs_high_r, srs_low_r, srslabel, 
-                                tar_high, tar_low, tar_high_r, tar_low_r, epoch, i)
+            tar_struct = self.spatial_aug.augment_spatial(tar_struct, mat_t, code_spa_t)
+            tar_style = self.spatial_aug.augment_spatial(tar_style, mat_t, code_spa_t)
+            tar_struct_r = self.spatial_aug.augment_spatial(tar_struct_r, mat_t, code_spa_t)
+            tar_style_r = self.spatial_aug.augment_spatial(tar_style_r, mat_t, code_spa_t)
 
-            res = '\t'.join(['Epoch: [%d/%d]' % (epoch + 1, self.epoches),
-                             'Iter: [%d/%d]' % (i + 1, self.iters),
-                             'Seg: ' + self.L_seg_log.__str__(),
-                             'T_Cons: ' + self.L_consist_log.__str__(),
-                             'T_Ent: ' + self.L_ent_log.__str__()])
+            # Train step
+            self.train_iterator(
+                srs_struct,
+                srs_style,
+                srs_struct_r,
+                srs_style_r,
+                srslabel,
+                tar_struct,
+                tar_style,
+                tar_struct_r,
+                tar_style_r,
+                epoch,
+                i
+            )
+
+            res = '\t'.join([
+                'Epoch: [%d/%d]' % (epoch_number, self.epoches),
+                'Iter: [%d/%d]' % (i + 1, self.iters),
+                'Seg: ' + self.L_seg_log.__str__(),
+                'T_Cons: ' + self.L_consist_log.__str__()
+            ])
+
         print(res)
-        
+
+    def validate(self, epoch_number):
+        """
+        Validation is performed only on the labeled source-domain validation set.
+        The source validation Dice is used for checkpoint selection.
+        """
+        self.model.eval()
+        self.L_val_dice_log.reset()
+        self.L_val_loss_log.reset()
+
+        val_class_dices = []
+
+        with torch.no_grad():
+            for i, (val_struct, val_style, vallabel) in enumerate(self.dataloader_val):
+
+                if torch.cuda.is_available():
+                    val_struct = val_struct.cuda()
+                    val_style = val_style.cuda()
+                    vallabel = vallabel.cuda()
+
+                vallabel_np_for_loss = vallabel.cpu().numpy()[0][0]
+
+                vallabel_onehot = torch.from_numpy(
+                    self.to_categorical(
+                        vallabel_np_for_loss,
+                        num_classes=self.n_classes
+                    )[np.newaxis, :, :, :, :]
+                ).cuda()
+
+                pred_mask, _ = self.model(
+                    x_struct=val_struct,
+                    x_style=val_style,
+                    mod='A',
+                    rmmax=self.srs_rmmax
+                )
+
+                loss_seg = self.L_seg(pred_mask, vallabel_onehot)
+                self.L_val_loss_log.update(loss_seg.item(), val_struct.size(0))
+
+                valseg_np = np.argmax(pred_mask[0].cpu().numpy(), axis=0)
+                valseg_onehot = self.to_categorical(
+                    valseg_np,
+                    num_classes=self.n_classes
+                )
+                vallab_onehot_np = vallabel_onehot[0].cpu().numpy()
+
+                valdices_all = []
+
+                for cls in range(self.n_classes - 1):
+                    valdices_all.append(
+                        dice(
+                            valseg_onehot[cls + 1],
+                            vallab_onehot_np[cls + 1]
+                        )
+                    )
+
+                val_class_dices.append(valdices_all)
+
+                mean_dice = np.mean(valdices_all)
+                self.L_val_dice_log.update(mean_dice, val_struct.size(0))
+
+        if len(val_class_dices) > 0:
+            avg_class_dices = np.mean(np.array(val_class_dices), axis=0)
+            class_dice_str = " | ".join([
+                f"Cls{i + 1}: {d:.4f}"
+                for i, d in enumerate(avg_class_dices)
+            ])
+        else:
+            avg_class_dices = np.zeros(self.n_classes - 1)
+            class_dice_str = "No Data"
+
+        print(
+            f"Source Validation Epoch {epoch_number}: "
+            f"Val_Loss {self.L_val_loss_log.avg:.4f}, "
+            f"Val_Dice {self.L_val_dice_log.avg:.4f}"
+        )
+        print(f"Details Dice: {class_dice_str}")
+        print("")
+
         self.model.train()
 
         return avg_class_dices
 
-    def checkpoint(self, epoch):
-        torch.save(self.model.state_dict(), '{0}/ec_epoch_{1}.pth'.format(self.checkpoint_, epoch + self.start_epoch))
+    def draw_curve(self):
+        epochs = self.history['epoch']
+        seg_loss = self.history['train_seg_loss']
+        val_dice = self.history['val_dice']
 
-    def load_model(self, path, epoch):
-        print("loading model epoch ", str(epoch))
-        self.model.load_state_dict(torch.load('{0}/ec_epoch_{1}.pth'.format(path, epoch)), strict=True) 
+        fig, ax1 = plt.subplots(figsize=(10, 6))
+
+        color_loss = 'tab:blue'
+        ax1.set_xlabel('Epochs')
+        ax1.set_ylabel('Segmentation Loss', color=color_loss, fontsize=12)
+        l1, = ax1.plot(
+            epochs,
+            seg_loss,
+            color=color_loss,
+            label='Train Seg Loss',
+            linewidth=2
+        )
+        ax1.tick_params(axis='y', labelcolor=color_loss)
+        ax1.grid(True, alpha=0.3)
+
+        ax2 = ax1.twinx()
+
+        color_dice = 'tab:red'
+        ax2.set_ylabel('Source Validation Dice', color=color_dice, fontsize=12)
+        l2, = ax2.plot(
+            epochs,
+            val_dice,
+            color=color_dice,
+            label='Source Val Dice',
+            linewidth=2
+        )
+        ax2.tick_params(axis='y', labelcolor=color_dice)
+
+        plt.title('Training Loss & Source Validation Dice', fontsize=14)
+
+        lines = [l1, l2]
+        labels = [l.get_label() for l in lines]
+        ax1.legend(lines, labels, loc='center right')
+
+        fig.tight_layout()
+
+        save_path = os.path.join(self.checkpoint_, 'training_curves.png')
+        plt.savefig(save_path, dpi=100)
+        plt.close()
+
+    def checkpoint(self, epoch_number):
+        save_path = os.path.join(
+            self.checkpoint_,
+            'best_source_val_model.pth'
+        )
+
+        torch.save(
+            self.model.state_dict(),
+            save_path
+        )
+
+        with open(
+            os.path.join(self.checkpoint_, 'best_source_val.txt'),
+            'w'
+        ) as f:
+            f.write('Best epoch: %d\n' % epoch_number)
+            f.write('Best source validation Dice: %.6f\n' % self.best_val_dice)
+
+        print(
+            'Best model saved: epoch %d, source validation Dice %.4f'
+            % (epoch_number, self.best_val_dice)
+        )
+
+    def load_model(self, path):
+        print("loading model: ", path)
+        self.model.load_state_dict(
+            torch.load(path),
+            strict=True
+        )
 
     def train(self):
-    
-        csv_head = ['epoch', 'loss_consist', 'loss_seg']
+
+        csv_head = [
+            'epoch',
+            'loss_consist',
+            'loss_seg',
+            'source_val_dice',
+            'source_val_loss'
+        ]
+
         for i in range(self.n_classes - 1):
-            csv_head.append(f'val_dice_cls_{i+1}')
+            csv_head.append(f'source_val_dice_cls_{i + 1}')
 
-        self.trainwriter = LogWriter(name=self.checkpoint_ + "/train_" + self.model_name, head=csv_head) 
+        self.trainwriter = LogWriter(
+            name=self.checkpoint_ + "/train_" + self.model_name,
+            head=csv_head
+        )
 
-        for epoch in range(self.epoches - self.start_epoch):
+        for epoch_index in range(self.start_epoch, self.epoches):
+
+            epoch_number = epoch_index + 1
+
             self.L_seg_log.reset()
             self.L_consist_log.reset()
 
-            self.epoch = epoch
-            self.train_epoch(epoch + self.start_epoch)
-            
-            self.history['epoch'].append(epoch + self.start_epoch)
-            self.history['train_seg_loss'].append(self.L_seg_log.avg) 
+            self.epoch = epoch_number
+
+            # Training
+            self.train_epoch(epoch_index, epoch_number)
+
+            # Source-domain validation
+            per_class_dices = self.validate(epoch_number)
+
+            self.history['epoch'].append(epoch_number)
+            self.history['train_seg_loss'].append(self.L_seg_log.avg)
+            self.history['val_dice'].append(self.L_val_dice_log.avg)
+
+            self.draw_curve()
 
             log_list = [
-                epoch + self.start_epoch, 
-                self.L_consist_log.avg, 
-                self.L_seg_log.avg
+                epoch_number,
+                self.L_consist_log.avg,
+                self.L_seg_log.avg,
+                self.L_val_dice_log.avg,
+                self.L_val_loss_log.avg
             ]
+
+            log_list.extend(per_class_dices)
+
             self.trainwriter.writeLog(log_list)
 
-            if epoch % self.save_epoch == 0:
-                self.checkpoint(epoch)
+            # Save only the best checkpoint according to source validation Dice
+            if self.L_val_dice_log.avg > self.best_val_dice:
+                self.best_val_dice = self.L_val_dice_log.avg
+                self.best_epoch = epoch_number
+                self.checkpoint(epoch_number)
 
-        self.checkpoint(self.epoches - self.start_epoch)
+        print("")
+        print("Training finished.")
+        print(
+            "Best source validation Dice: %.4f at epoch %d"
+            % (self.best_val_dice, self.best_epoch)
+        )
+
 
 if __name__ == '__main__':
+
     import argparse
-    parser = argparse.ArgumentParser(description='UDA seg Training Function')
+
+    parser = argparse.ArgumentParser(
+        description='CDFreqNet UDA Training Function'
+    )
+
+    parser.add_argument('--fold_num', type=int, default=5)
+    parser.add_argument('--fold', type=int, default=0)
 
     parser.add_argument('--direction', default="A2B")
-    parser.add_argument('--part', default="40_20")
-    parser.add_argument('--srs_rmmax', type=int, default=40)
-    parser.add_argument('--tar_rmmax', type=int, default=20)
+    parser.add_argument('--part', default="50_30")
+
+    parser.add_argument('--srs_rmmax', type=int, default=50)
+    parser.add_argument('--tar_rmmax', type=int, default=30)
+
     parser.add_argument('--start_epoch', type=int, default=0)
     parser.add_argument('--num_epoch', type=int, default=300)
-    parser.add_argument('--num_iters', type=int, default=150)
-    parser.add_argument('--save_epoch', type=int, default=50)
-    parser.add_argument('--model_name', default="CDFreqNet")
+    parser.add_argument('--num_iters', type=int, default=100)
 
-    parser.add_argument('--lr_seg', type=int, default=1e-3)
+    parser.add_argument('--model_name', default="CDFreqNet")
+    parser.add_argument('--seed', type=int, default=42)
+
+    parser.add_argument('--lr_seg', type=float, default=1e-3)
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--num_classes', type=int, default=5)
-    parser.add_argument('--A_root', default="./data/private/datasets/CT/abd/dataTr/")
-    parser.add_argument('--B_root', default="./data/private/datasets/MR/abd/dataTr/")
 
-    parser.add_argument('--checkpoint_root', default="./checks/checks_abd_ct2mr") 
-    
+    # Generic example paths
+    parser.add_argument(
+        '--A_root',
+        default="./data/source/train/"
+    )
+    parser.add_argument(
+        '--B_root',
+        default="./data/target/train/"
+    )
+    parser.add_argument(
+        '--Val_root',
+        default="./data/source/val/"
+    )
+
+    parser.add_argument(
+        '--checkpoint_root',
+        default="./checkpoints/"
+    )
+
     args = parser.parse_args()
 
-    trainer = Trainer(args = args)
+    seed_everything(args.seed)
+
+    trainer = Trainer(args=args)
     trainer.train()
