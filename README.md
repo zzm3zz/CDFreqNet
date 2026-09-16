@@ -212,7 +212,7 @@ The testing script reports segmentation metrics and saves the predicted masks.
 
 ## Extended Experimental Material
 
-The public **Extended Experimental Material** available from the repository Releases page provides additional analyses, including:
+The public [**Extended Experimental Material**](https://github.com/zzm3zz/CDFreqNet/releases) provides additional analyses, including:
 
 - Annotation-free coarse-to-fine preprocessing experiments.
 - Hyperparameter and implementation analyses.
