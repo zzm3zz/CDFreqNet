@@ -214,12 +214,11 @@ The testing script reports segmentation metrics and saves the predicted masks.
 
 The public **Extended Experimental Material** available from the repository Releases page provides additional analyses, including:
 
+- Annotation-free coarse-to-fine preprocessing experiments.
+- Hyperparameter and implementation analyses.
 - BraTS18 FLAIR-to-T2 and T2-to-FLAIR pathological cross-sequence adaptation.
 - FLARE25 CT-to-PET and PET-to-CT abdominal cross-modality adaptation.
 - Multi-source cross-site prostate adaptation.
-- Learnable wavelet decomposition analysis.
-- Annotation-free coarse-to-fine preprocessing experiments.
-- Hyperparameter and implementation analyses.
 
 ---
 
