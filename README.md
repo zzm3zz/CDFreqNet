@@ -1,25 +1,22 @@
-CDFreqNet
+# CDFreqNet
 
 Official PyTorch implementation of:
 
-Causally Inspired Decoupled Frequency Intervention for Unsupervised Domain Adaptation in Medical Image Segmentation
+**Causally Inspired Decoupled Frequency Intervention for Unsupervised Domain Adaptation in Medical Image Segmentation**
 
 CDFreqNet is a 3D unsupervised domain adaptation framework for cross-domain medical image segmentation. The framework contains three main components:
 
-DFI: Decoupled Frequency Intervention
-
-AFI: appearance-focused intervention on the low-frequency representation using Density-Guided Remap (DGR)
-
-SFI: structure-focused intervention on the high-frequency representation using bilateral filtering and stochastic cubic Bézier remapping
-
-AFR: Adaptive Frequency Reassembly
-
-DLC: Dynamic Loss Constraint
+- **DFI**: Decoupled Frequency Intervention
+  - **AFI**: appearance-focused intervention on the low-frequency representation using Density-Guided Remap (DGR)
+  - **SFI**: structure-focused intervention on the high-frequency representation using bilateral filtering and stochastic cubic Bézier remapping
+- **AFR**: Adaptive Frequency Reassembly
+- **DLC**: Dynamic Loss Constraint
 
 The implementation follows the training and model-selection protocol described in the paper: labeled source-domain data are used for supervised training, unlabeled target-domain data are used for UDA training, and the best checkpoint is selected exclusively on the labeled source-domain validation set.
 
-Repository Structure
+## Repository Structure
 
+```text
 CDFreqNet/
 ├── models/
 │   ├── network.py
@@ -33,13 +30,15 @@ CDFreqNet/
 ├── train_abd_ct2mr.py
 ├── test_abd_ct2mr.py
 └── README.md
+```
 
-Environment
+## Environment
 
 The code is implemented in Python and PyTorch.
 
 Main dependencies include:
 
+```text
 torch
 numpy
 scipy
@@ -48,43 +47,47 @@ opencv-python
 dtcwt
 matplotlib
 Pillow
+```
 
 Install the required packages according to your local CUDA/PyTorch environment.
 
-Datasets
+## Datasets
 
 The datasets used in the main experiments can be obtained from their official websites.
 
-Abdominal CT
+### Abdominal CT
 
-BTCV (Beyond the Cranial Vault)
+**BTCV (Beyond the Cranial Vault)**  
 Official website: https://www.synapse.org/#!Synapse:syn3193805
 
-Abdominal MRI
+### Abdominal MRI
 
-CHAOS Challenge
+**CHAOS Challenge**  
 Official website: https://chaos.grand-challenge.org/
 
-Cardiac CT/MRI
+### Cardiac CT/MRI
 
-MM-WHS 2017 (Multi-Modality Whole Heart Segmentation Challenge)
+**MM-WHS 2017 (Multi-Modality Whole Heart Segmentation Challenge)**  
 Official website: https://zmiclab.github.io/zxh/0/mmwhs/
 
-Prostate MRI
+### Prostate MRI
 
-PROMISE12 Challenge
+**PROMISE12 Challenge**  
 Official website: https://promise12.grand-challenge.org/
 
 Please follow the licenses, access requirements, and citation policies specified by the original dataset providers.
 
-Preprocessing
+## Preprocessing
 
 The preprocessing implementation is provided in:
 
+```text
 preprocess/preprocess_cdfreqnet.py
+```
 
 The preprocessing pipeline follows the protocol described in the paper:
 
+```text
 Raw 3D volume
     ↓
 RAI orientation
@@ -106,14 +109,18 @@ Resize to 64 × 160 × 160
 Two-level 3D DTCWT
     ↓
 Save data / high / low / seg as NPZ
+```
 
 The DTCWT decomposition uses:
 
+```text
 N = 2
 alpha = 2.0
+```
 
 Example for CT:
 
+```bash
 python preprocess/preprocess_cdfreqnet.py \
   --image_root ./raw_data/CT/images/ \
   --label_root ./raw_data/CT/labels/ \
@@ -121,9 +128,11 @@ python preprocess/preprocess_cdfreqnet.py \
   --modality CT \
   --use_roi \
   --overwrite
+```
 
 Example for MRI:
 
+```bash
 python preprocess/preprocess_cdfreqnet.py \
   --image_root ./raw_data/MRI/images/ \
   --label_root ./raw_data/MRI/labels/ \
@@ -131,20 +140,24 @@ python preprocess/preprocess_cdfreqnet.py \
   --modality MRI \
   --use_roi \
   --overwrite
+```
 
 For PROMISE12, ROI cropping is not used.
 
 After preprocessing, each NPZ file contains:
 
+```text
 data    normalized input volume
 high    HF-enhanced representation
 low     LF representation
 seg     segmentation label
+```
 
-Data Organization
+## Data Organization
 
 A recommended organization is:
 
+```text
 data/
 ├── source/
 │   ├── train/
@@ -152,20 +165,18 @@ data/
 └── target/
     ├── train/
     └── test/
+```
 
 For each adaptation direction:
 
-source/train: labeled source-domain training data
-
-source/val: labeled source-domain validation data
-
-target/train: unlabeled target-domain training data
-
-target/test: target-domain data reserved for final evaluation
+- `source/train`: labeled source-domain training data
+- `source/val`: labeled source-domain validation data
+- `target/train`: unlabeled target-domain training data
+- `target/test`: target-domain data reserved for final evaluation
 
 Target-domain labels are not used during UDA training or checkpoint selection.
 
-Training
+## Training
 
 CDFreqNet uses labeled source-domain training data and unlabeled target-domain training data.
 
@@ -173,14 +184,17 @@ The best checkpoint is selected only according to the mean foreground Dice on th
 
 Example:
 
+```bash
 python train_abd_ct2mr.py \
   --A_root ./data/source/train/ \
   --B_root ./data/target/train/ \
   --Val_root ./data/source/val/ \
   --checkpoint_root ./checkpoints/
+```
 
 The main settings are:
 
+```text
 Epochs                    300
 Batch size                1
 Learning rate             1e-3
@@ -193,27 +207,33 @@ BF diameter               7
 BF sigma_int              0.2
 BF sigma_sp               2
 Consistency weight        0.5
+```
 
 The training script saves only the checkpoint with the best source-domain validation Dice:
 
+```text
 best_source_val_model.pth
+```
 
-Testing
+## Testing
 
 The target-domain test set is used only after training and checkpoint selection are completed.
 
 Example:
 
+```bash
 python test_abd_ct2mr.py \
   --weight_path ./checkpoints/best_source_val_model.pth \
   --test_dir ./data/target/test/
+```
 
 The test script reports Dice and ASD and saves the predicted segmentation masks.
 
-UDA Protocol
+## UDA Protocol
 
 The released code follows the standard unsupervised domain adaptation setting:
 
+```text
 Source domain:
     training images + labels
     validation images + labels
@@ -221,55 +241,56 @@ Source domain:
 Target domain:
     unlabeled training images
     test images + labels for final evaluation only
+```
 
 Specifically:
 
-Source labels are used for supervised segmentation training.
+- Source labels are used for supervised segmentation training.
+- Target training labels are not accessed by the training dataloader.
+- Target images participate in UDA training without labels.
+- Source validation Dice is used for checkpoint selection.
+- Target test labels are used only for final quantitative evaluation.
 
-Target training labels are not accessed by the training dataloader.
+## Main DFI Settings
 
-Target images participate in UDA training without labels.
-
-Source validation Dice is used for checkpoint selection.
-
-Target test labels are used only for final quantitative evaluation.
-
-Main DFI Settings
-
-Appearance-Focused Intervention
+### Appearance-Focused Intervention
 
 DGR is applied to the low-frequency representation.
 
+```text
 Ms = 50
 Mt = 30
 eta = 0.3
+```
 
 DGR computes the normalized voxel occupancy of each intensity interval and adaptively restricts interval displacement according to its density.
 
-Structure-Focused Intervention
+### Structure-Focused Intervention
 
 The high-frequency representation is processed using slice-wise bilateral filtering followed by stochastic cubic Bézier remapping.
 
+```text
 Bilateral-filter diameter     7
 Intensity scale               0.2
 Spatial scale                 2
+```
 
-Dynamic Loss Constraint
+### Dynamic Loss Constraint
 
 DLC uses voxel-wise prediction confidence and intervention-induced feature deviation with epoch-wise annealing:
 
+```text
 W_DLC = C^omega(t) * (1 + omega(t) * D_cos)
+```
 
-where omega(t) gradually increases from 0 to 1 during training.
+where `omega(t)` gradually increases from 0 to 1 during training.
 
-Extended Experimental Material
+## Extended Experimental Material
 
-Additional experimental results, hyperparameter analyses, annotation-free preprocessing experiments, learnable-frequency comparisons, pathological adaptation experiments, and generalization analyses are provided in the Extended Experimental Material available from the repository Releases page.
+Additional experimental results, hyperparameter analyses, annotation-free preprocessing experiments, learnable-frequency comparisons, pathological adaptation experiments, and generalization analyses are provided in the **Extended Experimental Material** available from the repository Releases page.
 
-Notes
+## Notes
 
-Dataset files are not redistributed in this repository.
-
-Please download each dataset from its official website and follow the corresponding usage agreement.
-
-The released preprocessing, training, validation, and testing code is intended to reproduce the experimental protocol described in the paper.
+- Dataset files are not redistributed in this repository.
+- Please download each dataset from its official website and follow the corresponding usage agreement.
+- The released preprocessing, training, validation, and testing code is intended to reproduce the experimental protocol described in the paper.
