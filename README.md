@@ -221,12 +221,3 @@ The public **Extended Experimental Material** available from the repository Rele
 - Multi-source cross-site prostate adaptation.
 
 ---
-
-## Notes
-
-- Dataset files are not distributed with this repository.
-- Please download all datasets from their official websites.
-- Dataset-specific licenses and usage agreements remain the responsibility of the user.
-- The main `preprocess/preprocess_cdfreqnet.py` script corresponds to the CT/MRI preprocessing pipeline used in the primary experiments.
-- PET data require dataset-specific preprocessing because their intensity characteristics differ from conventional CT/MRI data; therefore, the CT intensity clipping used in `preprocess/preprocess_cdfreqnet.py` should not be directly applied to PET volumes.
-- The released preprocessing, training, validation, and testing code is intended to reproduce the experimental protocol described in the paper.
