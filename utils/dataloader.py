@@ -6,32 +6,11 @@ from torch.utils import data
 from scipy.special import comb
 
 
-def pre(x, clip_window=None):
-    if clip_window is not None:
-        x = np.clip(x, clip_window[0], clip_window[1])
-    else:
-        b = np.percentile(x, 99.5)
-        t = np.percentile(x, 0.5)
-        x = np.clip(x, t, b)
-
-    if np.max(x) == np.min(x):
-        return x - np.min(x)
-
-    x = (x - np.min(x)) / (np.max(x) - np.min(x)) * 2 - 1
-    return x
-
-
 def load_npz(path, load_label=True):
-    data = np.load(path)
-
-    img1 = data['struct'] if 'struct' in data else data['high']
-    img2 = data['style'] if 'style' in data else data['low']
-
-    if load_label:
-        label = data['seg']
-    else:
-        label = None
-
+    with np.load(path) as npz_data:
+        img1 = npz_data['high'].astype(np.float32)
+        img2 = npz_data['low'].astype(np.float32)
+        label = npz_data['seg'].astype(np.int64) if load_label else None
     return img1, img2, label
 
 
@@ -77,15 +56,12 @@ def density_guided_remap(data, ranges=[-1, 1], rand_point=[2, 50], eta=0.3, eps=
     M = random.randint(rand_point[0], rand_point[1])
 
     internal_points = torch.rand(M - 1, device=device) * (ranges[1] - ranges[0]) + ranges[0]
-    boundaries = torch.cat([
-        torch.tensor([ranges[0]], dtype=data.dtype, device=device),
-        internal_points,
-        torch.tensor([ranges[1]], dtype=data.dtype, device=device)
-    ])
+    boundaries = torch.cat([torch.tensor([ranges[0]], dtype=data.dtype, device=device),
+                            internal_points,
+                            torch.tensor([ranges[1]], dtype=data.dtype, device=device)])
     boundaries, _ = torch.sort(boundaries)
 
     valid_pixels = data[torch.isfinite(data)]
-
     if valid_pixels.numel() == 0:
         return data
 
@@ -98,7 +74,6 @@ def density_guided_remap(data, ranges=[-1, 1], rand_point=[2, 50], eta=0.3, eps=
     mapping = get_density_guided_mapping(rho.detach().cpu().numpy(), eta=eta).to(device)
 
     data_buckets = torch.bucketize(data.contiguous(), boundaries[1:-1])
-
     src_min = boundaries[data_buckets]
     src_max = boundaries[data_buckets + 1]
 
@@ -133,13 +108,10 @@ def bezier_curve(points, nTimes=100000):
     nPoints = len(points)
     xPoints = np.array([p[0] for p in points])
     yPoints = np.array([p[1] for p in points])
-
     t = np.linspace(0.0, 1.0, nTimes)
     polynomial_array = np.array([bernstein_poly(i, nPoints - 1, t) for i in range(nPoints)])
-
     xvals = np.dot(xPoints, polynomial_array)
     yvals = np.dot(yPoints, polynomial_array)
-
     return xvals, yvals
 
 
@@ -158,12 +130,10 @@ def nonlinear_transformation(x, prob=1.0):
 
     x_normalized = np.clip((x_np + 1.0) / 2.0, 0.0, 1.0)
 
-    points = np.array([
-        [0.0, 0.0],
-        [random.random(), random.random()],
-        [random.random(), random.random()],
-        [1.0, 1.0]
-    ], dtype=np.float64)
+    points = np.array([[0.0, 0.0],
+                       [random.random(), random.random()],
+                       [random.random(), random.random()],
+                       [1.0, 1.0]], dtype=np.float64)
 
     points[:, 0] = np.sort(points[:, 0])
 
@@ -222,7 +192,6 @@ class BilateralFilter(object):
         flat_img = img.reshape(-1, original_shape[-2], original_shape[-1])
 
         out_list = []
-
         for i in range(flat_img.shape[0]):
             filtered_slice = cv2.bilateralFilter(flat_img[i], d=self.d, sigmaColor=self.sigma_int, sigmaSpace=self.sigma_sp)
             out_list.append(filtered_slice)
@@ -244,12 +213,9 @@ class Dataset3D(data.Dataset):
         rootfile = self.filenames[index]
         img1, img2, label = load_npz(rootfile, load_label=True)
 
-        img1 = pre(img1)
-        img2 = pre(img2)
-
-        img1 = img1.astype(np.float32)[None, ...]
-        img2 = img2.astype(np.float32)[None, ...]
-        label = label.astype(np.int64)[None, ...]
+        img1 = img1[None, ...]
+        img2 = img2[None, ...]
+        label = label[None, ...]
 
         return img1, img2, label
 
@@ -262,6 +228,7 @@ class Dataset3D_DFI(data.Dataset):
         super(Dataset3D_DFI, self).__init__()
         self.filenames = dir_
         self.use_label = use_label
+
         self.sfi_1 = BilateralFilter(prob=1.0, d=7, sigma_int=0.2, sigma_sp=2)
         self.sfi_2 = Bezier_curve(p=1.0)
         self.afi = AppearanceFrequencyIntervention(p=1.0, rmmax=rmmax, eta=eta)
@@ -270,11 +237,8 @@ class Dataset3D_DFI(data.Dataset):
         rootfile = self.filenames[index]
         img1, img2, label = load_npz(rootfile, load_label=self.use_label)
 
-        img1 = pre(img1)
-        img2 = pre(img2)
-
-        img1 = img1.astype(np.float32)[None, ...]
-        img2 = img2.astype(np.float32)[None, ...]
+        img1 = img1[None, ...]
+        img2 = img2[None, ...]
 
         img1_r = torch.from_numpy(img1)
         img2_r = torch.from_numpy(img2)
@@ -284,7 +248,7 @@ class Dataset3D_DFI(data.Dataset):
         img2_step1 = self.afi(img2_r)
 
         if self.use_label:
-            label = label.astype(np.int64)[None, ...]
+            label = label[None, ...]
         else:
             label = np.zeros((1,) + img1.shape[1:], dtype=np.int64)
 
