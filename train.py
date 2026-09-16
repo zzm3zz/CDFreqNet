@@ -14,7 +14,7 @@ from utils.utils import AverageMeter, LogWriter, dice
 import numpy as np
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
-from utils.DynamicTemporalConstraint import DynamicTemporalConstraint, SpatialWeighted_DiceLoss
+from utils.DynamicLossConstraint import DynamicLossConstraint, SpatialWeighted_DiceLoss
 
 
 def seed_everything(seed):
@@ -173,7 +173,7 @@ class Trainer(object):
         self.L_seg = dice_loss
         self.L_mse = nn.MSELoss()
 
-        self.dtc = DynamicTemporalConstraint(num_classes=self.n_classes,
+        self.dlc = DynamicLossConstraint(num_classes=self.n_classes,
                                              tau=0.5,
                                              feat_channels=64).cuda()
 
@@ -259,7 +259,7 @@ class Trainer(object):
             rmmax=self.tar_rmmax
         )
 
-        w_src, w_tgt, loss_align = self.dtc(
+        w_src, w_tgt, loss_align = self.dlc(
             f_clean_src=feat_src_clean,
             f_aug_src=feat_src_style,
             p_aug_src=pred_src_style,
