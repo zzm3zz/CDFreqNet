@@ -4,14 +4,6 @@ Official PyTorch implementation of:
 
 **Causally Inspired Decoupled Frequency Intervention for Unsupervised Domain Adaptation in Medical Image Segmentation**
 
-CDFreqNet is a 3D unsupervised domain adaptation framework for cross-domain medical image segmentation. The framework contains three main components:
-
-- **DFI**: Decoupled Frequency Intervention
-  - **AFI**: appearance-focused intervention on the low-frequency representation using Density-Guided Remap (DGR)
-  - **SFI**: structure-focused intervention on the high-frequency representation using bilateral filtering and stochastic cubic Bézier remapping
-- **AFR**: Adaptive Frequency Reassembly
-- **DLC**: Dynamic Loss Constraint
-
 The implementation follows the training and model-selection protocol described in the paper: labeled source-domain data are used for supervised training, unlabeled target-domain data are used for UDA training, and the best checkpoint is selected exclusively on the labeled source-domain validation set.
 
 ## Repository Structure
